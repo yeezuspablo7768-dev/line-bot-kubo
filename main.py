@@ -96,7 +96,9 @@ def handle_message(event):
         
         chat = chat_sessions[user_id]
         response = chat.send_message(user_text)
-        reply_text = response.text
+        
+        # ここで「**」を「空文字」に置換して消し去る
+        reply_text = response.text.replace("**", "")
         
     except Exception as e:
         reply_text = "エラーが発生しました: " + str(e)
