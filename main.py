@@ -1,6 +1,7 @@
 import os
 import logging
 import requests
+import threading
 from flask import Flask, request, abort, jsonify
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -348,7 +349,7 @@ def handle_message(event):
     user_id = event.source.user_id
     user_text = event.message.text
     
-    # User ID確認コマンド
+    # User ID確認コマンド（軽量なのでそのまま処理）
     if user_text == '/myid':
         try:
             line_bot_api.reply_message(
@@ -363,9 +364,20 @@ def handle_message(event):
             )
         return
     
+    # 通常のメッセージはバックグラウンドで処理
+    # これにより、サーバースリープからの復帰時でもWebhookタイムアウトを回避できる
+    thread = threading.Thread(
+        target=process_message_async,
+        args=(user_id, user_text)
+    )
+    thread.start()
+    # 即座にreturnしてLINEに200 OKを返す
+
+
+def process_message_async(user_id, user_text):
+    """バックグラウンドでメッセージを処理し、push_messageで返信する"""
     try:
         # メッセージごとにランダムな用語セットでチャットを作成
-        # 毎回違う用語を使うためにセッションを新規作成
         random_prompt = get_random_system_prompt(user_id)
         chat = client.chats.create(
             model="gemini-2.5-flash",
@@ -384,21 +396,14 @@ def handle_message(event):
         reply_text = "エラーが発生しました: " + str(e)
         app.logger.error(f"Gemini Error: {e}")
 
-    # LINEに返信する（reply_messageが失敗したらpush_messageで送信）
+    # push_messageで送信（reply_tokenは使えないため）
     try:
-        line_bot_api.reply_message(
-            event.reply_token,
+        line_bot_api.push_message(
+            user_id,
             TextSendMessage(text=reply_text)
         )
-    except Exception as e:
-        app.logger.warning(f"Reply failed, using push_message: {e}")
-        try:
-            line_bot_api.push_message(
-                user_id,
-                TextSendMessage(text=reply_text)
-            )
-        except Exception as push_error:
-            app.logger.error(f"Push message also failed: {push_error}")
+    except Exception as push_error:
+        app.logger.error(f"Push message failed: {push_error}")
 
 if __name__ == "__main__":
     app.run()
