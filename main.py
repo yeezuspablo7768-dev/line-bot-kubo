@@ -239,10 +239,17 @@ def handle_message(event):
     
     # User ID確認コマンド
     if user_text == '/myid':
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=f"あなたのUser IDは:\n{user_id}")
-        )
+        try:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=f"あなたのUser IDは:\n{user_id}")
+            )
+        except Exception as e:
+            app.logger.warning(f"Reply failed, using push_message: {e}")
+            line_bot_api.push_message(
+                user_id,
+                TextSendMessage(text=f"あなたのUser IDは:\n{user_id}")
+            )
         return
     
     try:
@@ -266,11 +273,21 @@ def handle_message(event):
         reply_text = "エラーが発生しました: " + str(e)
         app.logger.error(f"Gemini Error: {e}")
 
-    # LINEに返信する
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text=reply_text)
-    )
+    # LINEに返信する（reply_messageが失敗したらpush_messageで送信）
+    try:
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=reply_text)
+        )
+    except Exception as e:
+        app.logger.warning(f"Reply failed, using push_message: {e}")
+        try:
+            line_bot_api.push_message(
+                user_id,
+                TextSendMessage(text=reply_text)
+            )
+        except Exception as push_error:
+            app.logger.error(f"Push message also failed: {push_error}")
 
 if __name__ == "__main__":
     app.run()
