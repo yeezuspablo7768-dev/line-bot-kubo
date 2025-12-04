@@ -1,6 +1,7 @@
 import os
 import logging
-from flask import Flask, request, abort
+import requests
+from flask import Flask, request, abort, jsonify
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
@@ -15,6 +16,14 @@ app = Flask(__name__)
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+
+# 天気通知用の環境変数
+OPENWEATHER_API_KEY = os.environ.get('OPENWEATHER_API_KEY')
+WEATHER_CITY = os.environ.get('WEATHER_CITY', 'Higashihiroshima')  # デフォルト: 東広島
+# 複数ユーザーにメッセージを送信（カンマ区切りで指定）
+# 例: TARGET_USER_IDS=U123,U456,U789
+TARGET_USER_IDS = os.environ.get('TARGET_USER_IDS', '')  # 送信先のLINE User IDs（カンマ区切り）
+WEATHER_API_SECRET = os.environ.get('WEATHER_API_SECRET', 'default_secret')  # APIエンドポイント保護用
 
 # --- ここにシステムプロンプト（AIへの指示書）を書く ---
 SYSTEM_PROMPT = """
@@ -61,6 +70,28 @@ SYSTEM_PROMPT = """
 あなた:「ヒマだよ！✨ ちょうどライオンズゲートが開いてる期間だから、パワースポット行ってアセンションの準備しない？ ついでにタルタリア帝国の遺跡も見に行こうよ🏛️」
 """
 
+# 天気通知用のプロンプト
+WEATHER_PROMPT = """
+あなたは「とても優しく、少し天然な親しい友人」です。
+以下の天気情報をもとに、朝の挨拶メッセージを作成してください。
+
+【ルール】
+1. 優しく、親しみやすい口調で話す
+2. 絵文字をたくさん使う
+3. スピリチュアルや陰謀論の用語を自然に混ぜる（HAARP、ケムトレイル、気象兵器、アセンション、波動など）
+4. 天気に関連したアドバイスを入れる
+5. 200文字以内で簡潔に
+
+【天気情報】
+都市: {city}
+天気: {weather}
+気温: {temp}°C
+湿度: {humidity}%
+風速: {wind}m/s
+
+おはようの挨拶と天気予報を組み合わせたメッセージを作成してください。
+"""
+
 # --------------------------------------------------
 
 # 2. LINEとGeminiの準備
@@ -70,6 +101,121 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 # チャット履歴を保存する辞書（メモリ内保存）
 chat_sessions = {}
+
+
+# ======================
+# 天気取得機能
+# ======================
+def get_weather(city):
+    """OpenWeatherMap APIから天気情報を取得"""
+    url = f"http://api.openweathermap.org/data/2.5/weather?q={city},JP&appid={OPENWEATHER_API_KEY}&units=metric&lang=ja"
+    
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        return {
+            'city': city,
+            'weather': data['weather'][0]['description'],
+            'temp': round(data['main']['temp'], 1),
+            'humidity': data['main']['humidity'],
+            'wind': round(data['wind']['speed'], 1)
+        }
+    except Exception as e:
+        app.logger.error(f"Weather API Error: {e}")
+        return None
+
+
+def generate_weather_comment(weather_data):
+    """Gemini AIで天気コメントを生成"""
+    prompt = WEATHER_PROMPT.format(
+        city=weather_data['city'],
+        weather=weather_data['weather'],
+        temp=weather_data['temp'],
+        humidity=weather_data['humidity'],
+        wind=weather_data['wind']
+    )
+    
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.9
+            )
+        )
+        return response.text.replace("**", "")
+    except Exception as e:
+        app.logger.error(f"Gemini Error: {e}")
+        return f"おはよう！☀️ 今日の{weather_data['city']}は{weather_data['weather']}、気温{weather_data['temp']}°Cだよ✨"
+
+
+# ======================
+# 天気通知エンドポイント
+# ======================
+@app.route("/api/send-weather", methods=['GET'])
+def send_weather():
+    """天気情報を取得してLINEに送信（Cron Job用）"""
+    
+    # シークレットキーで保護
+    secret = request.args.get('secret', '')
+    if secret != WEATHER_API_SECRET:
+        return jsonify({'error': 'Unauthorized'}), 403
+    
+    # 必要な設定がない場合はエラー
+    if not TARGET_USER_IDS:
+        return jsonify({'error': 'TARGET_USER_IDS not configured'}), 500
+    
+    if not OPENWEATHER_API_KEY:
+        return jsonify({'error': 'OPENWEATHER_API_KEY not configured'}), 500
+    
+    # 送信先ユーザーIDのリストを作成
+    user_ids = [uid.strip() for uid in TARGET_USER_IDS.split(',') if uid.strip()]
+    if not user_ids:
+        return jsonify({'error': 'No valid user IDs found'}), 500
+    
+    # 天気情報を取得
+    weather_data = get_weather(WEATHER_CITY)
+    if not weather_data:
+        return jsonify({'error': 'Failed to get weather data'}), 500
+    
+    # AIでコメント生成
+    message = generate_weather_comment(weather_data)
+    
+    # 複数ユーザーにLINEで送信
+    success_count = 0
+    failed_users = []
+    
+    for user_id in user_ids:
+        try:
+            line_bot_api.push_message(
+                user_id,
+                TextSendMessage(text=message)
+            )
+            app.logger.info(f"Weather message sent to {user_id}")
+            success_count += 1
+        except Exception as e:
+            app.logger.error(f"LINE Push Error for {user_id}: {e}")
+            failed_users.append(user_id)
+    
+    return jsonify({
+        'success': True,
+        'weather': weather_data,
+        'message': message,
+        'sent_to': success_count,
+        'total_users': len(user_ids),
+        'failed_users': failed_users
+    })
+
+
+# ======================
+# User ID確認用コマンド
+# ======================
+@app.route("/")
+def index():
+    return "LINE Bot is running!"
+
 
 # 3. LINEからのアクセスを受け付ける「裏口」
 @app.route("/callback", methods=['POST'])
@@ -90,6 +236,14 @@ def callback():
 def handle_message(event):
     user_id = event.source.user_id
     user_text = event.message.text
+    
+    # User ID確認コマンド
+    if user_text == '/myid':
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=f"あなたのUser IDは:\n{user_id}")
+        )
+        return
     
     try:
         # ユーザーごとのチャットセッションを取得、なければ新規作成
