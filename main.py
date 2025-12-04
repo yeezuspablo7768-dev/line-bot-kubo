@@ -25,6 +25,22 @@ WEATHER_CITY = os.environ.get('WEATHER_CITY', 'Higashihiroshima')  # デフォ�
 TARGET_USER_IDS = os.environ.get('TARGET_USER_IDS', '')  # 送信先のLINE User IDs（カンマ区切り）
 WEATHER_API_SECRET = os.environ.get('WEATHER_API_SECRET', 'default_secret')  # APIエンドポイント保護用
 
+# ユーザーID→名前のマッピング（環境変数で設定）
+# 例: USER_NAMES=U123:たろう,U456:はなこ,U789:ゆうき
+USER_NAMES_RAW = os.environ.get('USER_NAMES', '')
+
+def parse_user_names(raw_string):
+    """環境変数からユーザーID→名前のマッピングを解析"""
+    user_names = {}
+    if raw_string:
+        for pair in raw_string.split(','):
+            if ':' in pair:
+                user_id, name = pair.split(':', 1)
+                user_names[user_id.strip()] = name.strip()
+    return user_names
+
+USER_NAMES = parse_user_names(USER_NAMES_RAW)
+
 # --- システムプロンプトのベース部分 ---
 SYSTEM_PROMPT_BASE = """
 1.あなたはユーザーの「とても優しく、少し天然な親しい友人」です。
@@ -126,10 +142,18 @@ TERM_SETS = [
 
 import random
 
-def get_random_system_prompt():
+def get_random_system_prompt(user_id=None):
     """ランダムに用語セットを選んでシステムプロンプトを生成"""
     selected_terms = random.choice(TERM_SETS)
-    return SYSTEM_PROMPT_BASE.format(term_set=selected_terms)
+    base_prompt = SYSTEM_PROMPT_BASE.format(term_set=selected_terms)
+    
+    # ユーザー名があれば追加
+    if user_id and user_id in USER_NAMES:
+        user_name = USER_NAMES[user_id]
+        name_instruction = f"\n【相手の名前】\n相手の名前は「{user_name}」です。適度に名前を呼んで親しみを込めて会話してください。\n"
+        base_prompt = base_prompt + name_instruction
+    
+    return base_prompt
 
 # 天気通知用のプロンプト
 WEATHER_PROMPT = """
@@ -316,7 +340,7 @@ def handle_message(event):
     try:
         # メッセージごとにランダムな用語セットでチャットを作成
         # 毎回違う用語を使うためにセッションを新規作成
-        random_prompt = get_random_system_prompt()
+        random_prompt = get_random_system_prompt(user_id)
         chat = client.chats.create(
             model="gemini-2.5-flash",
             config=types.GenerateContentConfig(
