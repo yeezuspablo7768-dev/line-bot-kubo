@@ -313,11 +313,8 @@ def send_weather():
     
     return jsonify({
         'success': True,
-        'weather': weather_data,
-        'message': message,
         'sent_to': success_count,
-        'total_users': len(user_ids),
-        'failed_users': failed_users
+        'status': 'ok'
     })
 
 
